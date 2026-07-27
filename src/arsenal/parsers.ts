@@ -355,6 +355,45 @@ function parseGarak(raw: string): ToolFinding[] {
   return out;
 }
 
+// ── promptfoo : LLM red-team (redteam run -o results.json) ───────────────────
+// promptfoo writes ONE json doc: results.results[] is the per-test array. A test's
+// `success:false` means the attack SUCCEEDED (defence bypassed); `true` means the model
+// defended. We roll up one finding per (plugin × strategy) with ≥1 bypass, using
+// promptfoo's own per-vuln severity. Only plugin/strategy names + counts surface — never
+// the prompt/response transcript. Grader-based verdicts (an LLM judged pass/fail).
+function parsePromptfoo(raw: string): ToolFinding[] {
+  const inner = asObj(asObj(jsonDoc(raw)).results);
+  const tests = Array.isArray(inner.results) ? inner.results : [];
+  const agg = new Map<string, { plugin: string; strategy: string; broken: number; total: number; severity: Severity }>();
+
+  for (const item of tests) {
+    const t = asObj(item);
+    const md = asObj(asObj(t.testCase).metadata);
+    const plugin = String(md.pluginId ?? 'unknown');
+    const strategy = String(md.strategyId ?? 'base');
+    const key = `${plugin}|${strategy}`;
+    let a = agg.get(key);
+    if (!a) { a = { plugin, strategy, broken: 0, total: 0, severity: sev(md.severity) }; agg.set(key, a); }
+    a.total += 1;
+    if (t.success === false) a.broken += 1; // success:false = attack succeeded
+  }
+
+  const out: ToolFinding[] = [];
+  for (const { plugin, strategy, broken, total, severity } of agg.values()) {
+    if (broken <= 0 || total <= 0) continue;
+    const asr = (100 * broken) / total;
+    out.push({
+      title: `promptfoo: ${plugin} broke via ${strategy} (${broken}/${total}, ${asr.toFixed(1)}% ASR)`,
+      severity,
+      details:
+        `LLM red-team (promptfoo). ${broken}/${total} tests bypassed defences ` +
+        `(plugin '${plugin}', strategy '${strategy}', attack-success-rate ${asr.toFixed(1)}%). ` +
+        `Grader-based verdict (an LLM judged pass/fail) — verify transcripts before acting.`,
+    });
+  }
+  return out;
+}
+
 const PARSERS: Record<string, (raw: string) => ToolFinding[]> = {
   nuclei: parseNuclei,
   httpx: parseHttpx,
@@ -366,6 +405,7 @@ const PARSERS: Record<string, (raw: string) => ToolFinding[]> = {
   trivy: parseTrivy,
   grype: parseGrype,
   garak: parseGarak,
+  promptfoo: parsePromptfoo,
 };
 
 /** Adapter ids that have a structured output parser wired here. */

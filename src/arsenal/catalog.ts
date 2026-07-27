@@ -610,9 +610,9 @@ export const TOOL_ADAPTERS: ToolAdapter[] = [
     evidenceKinds: ['prompt_eval', 'regression_result'],
     outputFormats: ['json', 'junit'],
     installHint: 'npm install -g promptfoo',
-    commandHint: 'promptfoo eval --output results.json',
-    parserStatus: 'planned',
-    notes: 'Best fit for repeatable prompt/tool/memory regression packs.',
+    commandHint: 'promptfoo redteam run -c <config> -o results.json',
+    parserStatus: 'structured',
+    notes: 'Red-team (incl. pliny plugin, crescendo). Needs a grader provider (env) + PROMPTFOO_DISABLE_REDTEAM_REMOTE_GENERATION=1 for keyless local generation. Scoped models + redacted transcripts.',
   },
   {
     id: 'slither',

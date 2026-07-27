@@ -226,7 +226,7 @@ import { PackBoard } from './pack/board.js';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
-import { readFile as fsReadFile, rm as fsRm } from 'node:fs/promises';
+import { readFile as fsReadFile, rm as fsRm, writeFile as fsWriteFile } from 'node:fs/promises';
 import { MissionControl, TaskQueue } from './mission/index.js';
 import { TargetEnvironment } from './target/index.js';
 import { EvidenceVault } from './evidence/index.js';
@@ -438,6 +438,10 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
           } catch {
             return '';
           }
+        },
+        // Write a config-driven tool's INPUT file (e.g. promptfoo's config yaml) before it runs.
+        writeToolInput: async (p: string, contents: string): Promise<void> => {
+          await fsWriteFile(p, contents, 'utf8');
         },
       };
       const existing = new Set(this.arsenal.getAllTools().map((t) => t.name));

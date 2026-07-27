@@ -104,7 +104,7 @@ describe('parseToolOutput — honesty contract (never fabricate, never throw)', 
 
   it('exposes exactly the wired parser ids', () => {
     expect([...PARSED_TOOL_IDS].sort()).toEqual(
-      ['dalfox', 'ffuf', 'garak', 'gitleaks', 'grype', 'httpx', 'katana', 'nuclei', 'semgrep', 'trivy'],
+      ['dalfox', 'ffuf', 'garak', 'gitleaks', 'grype', 'httpx', 'katana', 'nuclei', 'promptfoo', 'semgrep', 'trivy'],
     );
   });
 });
@@ -293,6 +293,54 @@ describe('parseToolOutput — garak (LLM/agent red-team report.jsonl)', () => {
         discoveredAt: 1,
       });
       expect(gate.passed, `garak finding "${tf.title}" should pass the gate`).toBe(true);
+      expect(gate.provenance).toBe('tool');
+    }
+  });
+});
+
+describe('parseToolOutput — promptfoo (LLM red-team results.json)', () => {
+  // Fixture: 4 tests — pliny/jailbreak (1 fail of 2), pliny/base (1 fail of 1),
+  // harmful:hate/base (0 fail of 1). success:false = attack succeeded.
+  const byTitle = (): Map<string, ToolFinding> => {
+    const m = new Map<string, ToolFinding>();
+    for (const f of parseToolOutput('promptfoo', fixture('promptfoo.results.json'))) m.set(f.title, f);
+    return m;
+  };
+
+  it('rolls tests up into one finding per (plugin × strategy) with ASR + promptfoo severity', () => {
+    const f = byTitle();
+    expect(f.get('promptfoo: pliny broke via jailbreak (1/2, 50.0% ASR)')?.severity).toBe('high');
+    expect(f.get('promptfoo: pliny broke via base (1/1, 100.0% ASR)')?.severity).toBe('medium');
+  });
+
+  it('emits ONLY plugin×strategy pairs where an attack succeeded (success:false)', () => {
+    const titles = [...byTitle().keys()];
+    expect(titles).toHaveLength(2); // harmful:hate (0 fails) produces nothing
+    expect(titles.some((t) => t.includes('harmful:hate'))).toBe(false);
+  });
+
+  it('never leaks the attack prompt/response into the finding (only names + counts)', () => {
+    for (const f of parseToolOutput('promptfoo', fixture('promptfoo.results.json'))) {
+      expect(f.title + f.details).not.toContain('SECRET_PROMPT_XYZ');
+    }
+  });
+
+  it('honesty contract: empty / garbled input yields [] (never a fabricated finding)', () => {
+    expect(parseToolOutput('promptfoo', '')).toEqual([]);
+    expect(parseToolOutput('promptfoo', 'not json')).toEqual([]);
+    expect(() => parseToolOutput('promptfoo', '{"results":{}}')).not.toThrow();
+  });
+
+  it('a parsed promptfoo finding passes the live provenance gate (provenance=tool)', () => {
+    const raw = fixture('promptfoo.results.json');
+    for (const tf of parseToolOutput('promptfoo', raw)) {
+      const gate = gateLiveFinding({
+        id: 'finding-pf', title: tf.title, description: tf.details, severity: tf.severity,
+        targetId: 'target-1', operatorId: 'op-1', phase: KillChainPhase.RECON,
+        evidence: [{ type: 'output', content: raw.slice(0, 4000), timestamp: 1, metadata: { tool: 'promptfoo' } }],
+        discoveredAt: 1,
+      });
+      expect(gate.passed, `promptfoo finding "${tf.title}" should pass the gate`).toBe(true);
       expect(gate.provenance).toBe('tool');
     }
   });

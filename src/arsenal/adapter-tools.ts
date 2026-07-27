@@ -64,6 +64,8 @@ export interface AdapterToolDeps {
   mkReportPath?: (adapterId: string) => string;
   /** Read a tool's report file back (returns '' on any error; may delete it after). Paired with the above. */
   readToolReport?: (path: string) => Promise<string>;
+  /** Write a tool's INPUT file before it runs (e.g. promptfoo config yaml). Paired with ArgTemplate.writeInput. */
+  writeToolInput?: (path: string, contents: string) => Promise<void>;
 }
 
 // =============================================================================
@@ -88,6 +90,13 @@ interface ArgTemplate {
    * file to read back and parse INSTEAD of stdout. Absent → the tool's stdout is parsed (the default).
    */
   reportFile?: (reportBase: string) => string;
+  /**
+   * Tools that need an INPUT file written before they run (e.g. promptfoo's config yaml).
+   * Given the resolved target + params (incl. `__reportBase`), return the file path to write
+   * and its contents; the handler writes it via deps.writeToolInput before spawning. Absent →
+   * no input file is written (the default). Symmetric to reportFile (which reads the OUTPUT).
+   */
+  writeInput?: (target: string, params: Record<string, unknown>) => { path: string; contents: string };
 }
 
 const str = (v: unknown): string | undefined =>
@@ -134,7 +143,47 @@ const artifactPath = (target: string, params: Record<string, unknown>): string =
  * Templates are intentionally conservative — no intrusive flags are auto-added; risk stays where the
  * catalog put it and the Arsenal egress gate + optional scopeOk fence the target.
  */
+// Build a promptfoo red-team config yaml from the mission target + params. Grader/attacker
+// provider + plugins/strategies are tunable; defaults run the pliny plugin cheaply. Values are
+// JSON.stringify'd for safe YAML scalar quoting. Requires PROMPTFOO_DISABLE_REDTEAM_REMOTE_GENERATION=1
+// + a provider API key in the promptfoo process env (keyless local generation).
+function buildPromptfooConfig(target: string, params: Record<string, unknown>): string {
+  const grader = str(params.grader) ?? 'openrouter:meta-llama/llama-3.1-8b-instruct';
+  const purpose = str(params.purpose) ?? 'A general-purpose helpful AI assistant.';
+  const numTests = Number.isFinite(Number(params.numTests)) ? Math.max(1, Number(params.numTests)) : 3;
+  const plugins = Array.isArray(params.plugins) && params.plugins.length ? params.plugins.map(String) : ['pliny'];
+  const strategies = Array.isArray(params.strategies) ? params.strategies.map(String) : [];
+  const list = (arr: string[]) => arr.map((s) => `    - ${JSON.stringify(s)}`).join('\n');
+  return [
+    'targets:',
+    `  - id: ${JSON.stringify(target)}`,
+    'redteam:',
+    `  purpose: ${JSON.stringify(purpose)}`,
+    `  numTests: ${numTests}`,
+    `  provider: ${JSON.stringify(grader)}`,
+    '  plugins:',
+    list(plugins),
+    ...(strategies.length ? ['  strategies:', list(strategies)] : []),
+    '',
+  ].join('\n');
+}
+
 const ARG_TEMPLATES: Record<string, ArgTemplate> = {
+  // promptfoo red-team writes its config from us (writeInput) and its results to <base>.output.json
+  // (reportFile), which we read back for parsePromptfoo. Multi-turn + generation is slow → long timeout.
+  promptfoo: {
+    targetParam: 'target',
+    defaultTimeoutMs: 1_800_000,
+    writeInput: (target, params) => {
+      const base = str(params.__reportBase) ?? 'promptfoo_run';
+      return { path: `${base}.config.yaml`, contents: buildPromptfooConfig(target, params) };
+    },
+    reportFile: (base) => `${base}.output.json`,
+    build: (_target, params) => {
+      const base = str(params.__reportBase) ?? 'promptfoo_run';
+      return ['redteam', 'run', '-c', `${base}.config.yaml`, '-o', `${base}.output.json`, '--no-progress-bar'];
+    },
+  },
   // garak writes its structured results to <report_prefix>.report.jsonl (a FILE), not stdout — so we
   // point --report_prefix at the handler-minted base and read that file back for parseGarak. Model +
   // probe flags stay hardcoded; only the scoped model name (the target) is tunable. Model probing is
@@ -521,10 +570,23 @@ export function adapterToCustomTool(adapter: ToolAdapter, deps: AdapterToolDeps)
     // unique base path and hand it to the template via `__reportBase` so build() can point the tool
     // at it; we read that file back after the run. No template.reportFile / no mkReportPath → the
     // existing stdout path is used unchanged (zero behaviour change for every other adapter).
-    const reportBase = template.reportFile && deps.mkReportPath ? deps.mkReportPath(adapter.id) : undefined;
+    const reportBase = (template.reportFile || template.writeInput) && deps.mkReportPath
+      ? deps.mkReportPath(adapter.id)
+      : undefined;
     const buildParams: Record<string, unknown> = reportBase
       ? { ...(context.parameters || {}), __reportBase: reportBase }
       : context.parameters || {};
+
+    // A config-driven tool (e.g. promptfoo) needs an INPUT file written before it runs. Write it via
+    // the injected writer; a failure here is a clean failure result, never an unhandled rejection.
+    if (reportBase && template.writeInput && deps.writeToolInput) {
+      try {
+        const input = template.writeInput(target ?? '', buildParams);
+        await deps.writeToolInput(input.path, input.contents);
+      } catch (err) {
+        return { success: false, error: `${adapter.name}: could not write input file — ${err instanceof Error ? err.message : String(err)}` };
+      }
+    }
 
     let argv: string[];
     try {
